@@ -319,9 +319,9 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         int $userId,
         int|float $channelNumber,
     ): Channel {
-        $groupName        = $settings['channel_group'] ?? 'YouTube Live';
-        $profileId        = (int) ($settings['stream_profile_id'] ?? 0);
-        $playlistId       = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $groupName = $settings['channel_group'] ?? 'YouTube Live';
+        $profileId = (int) ($settings['stream_profile_id'] ?? 0);
+        $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
 
         $group = Group::firstOrCreate(
@@ -616,8 +616,8 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
             if ($handle) {
                 $entries[] = [
-                    'handle'       => $handle,
-                    'base_number'  => $baseNumber,
+                    'handle' => $handle,
+                    'base_number' => $baseNumber,
                     'title_filter' => $titleFilter,
                 ];
             }

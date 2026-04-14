@@ -1,7 +1,7 @@
 {
   "id": "youtubearr",
   "name": "YouTubearr",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "api_version": "1.0.0",
   "repository": "m3ue/youtubearr-m3ue",
   "description": "Monitor YouTube channels for livestreams and auto-create/remove channels. Zero API quota — uses yt-dlp.",
