@@ -3,6 +3,7 @@
 namespace AppLocalPlugins\Youtubearr;
 
 use App\Models\Channel;
+use App\Models\CustomPlaylist;
 use App\Models\Group;
 use App\Models\StreamProfile;
 use App\Plugins\Contracts\ChannelProcessorPluginInterface;
@@ -14,6 +15,8 @@ use Carbon\CarbonInterface;
 use Cron\CronExpression;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Str;
+use Spatie\Tags\Tag;
 
 class Plugin implements ChannelProcessorPluginInterface, PluginInterface, ScheduledPluginInterface
 {
@@ -324,12 +327,26 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $playlistId = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
         $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
 
-        $group = Group::firstOrCreate(
-            ['name' => $groupName, 'user_id' => $userId],
-            ['user_id' => $userId],
-        );
+        $group = $playlistId
+            ? Group::firstOrCreate(
+                ['name' => $groupName, 'user_id' => $userId, 'playlist_id' => $playlistId],
+                ['user_id' => $userId, 'playlist_id' => $playlistId],
+            )
+            : null;
+
+        $customPlaylist = $customPlaylistId ? CustomPlaylist::find($customPlaylistId) : null;
+
+        $groupTag = null;
+        if ($customPlaylist) {
+            $groupTag = $customPlaylist->groupTags()->where('name->en', $groupName)->first();
+            if (! $groupTag) {
+                $groupTag = Tag::create(['name' => ['en' => $groupName], 'type' => $customPlaylist->uuid]);
+                $customPlaylist->attachTag($groupTag);
+            }
+        }
 
         $channel = Channel::create([
+            'uuid' => Str::orderedUuid()->toString(),
             'title' => $metadata['title'],
             'url' => "https://www.youtube.com/watch?v={$metadata['video_id']}",
             'channel' => (int) $channelNumber,
@@ -339,10 +356,12 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'enabled' => true,
             'shift' => 0,
             'logo_type' => 'channel',
+            'enable_proxy' => true,
             'user_id' => $userId,
-            'group_id' => $group->id,
+            'group_id' => $group?->id,
             'stream_profile_id' => $profileId ?: null,
             'playlist_id' => $playlistId,
+            'custom_playlist_id' => $playlistId ? null : $customPlaylist?->id,
             'info' => [
                 'plugin' => self::PLUGIN_MARKER,
                 'youtube_video_id' => $metadata['video_id'],
@@ -352,9 +371,11 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             ],
         ]);
 
-        if ($customPlaylistId) {
-            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylistId]);
-            $channel->save();
+        if ($customPlaylist) {
+            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylist->id]);
+            if ($groupTag) {
+                $channel->attachTag($groupTag);
+            }
         }
 
         return $channel;
