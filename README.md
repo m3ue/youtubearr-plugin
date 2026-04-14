@@ -36,6 +36,7 @@ Once staged, approve the install review in the UI and enable the plugin.
 |---|---|---|
 | `monitored_channels` | — | One channel per line. Formats: `@handle`, `@handle=BaseNumber`, `@handle=BaseNumber:TitleFilter` |
 | `stream_profile_id` | — | **Required.** A yt-dlp Stream Profile. Cookies on this profile are used for both stream detection and proxy playback. |
+| `target_playlist_id` | — | Standard playlist to associate created channels with. Leave empty to skip. |
 | `target_custom_playlist_id` | — | Custom playlist to add created channels to. Leave empty to skip. |
 | `channel_group` | `YouTube Live` | Group name assigned to created channels. |
 | `stream_quality` | `best` | Quality hint passed to yt-dlp during stream detection (`best`, `1080p`, `720p`, `480p`). |

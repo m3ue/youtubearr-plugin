@@ -319,9 +319,10 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         int $userId,
         int|float $channelNumber,
     ): Channel {
-        $groupName = $settings['channel_group'] ?? 'YouTube Live';
-        $profileId = (int) ($settings['stream_profile_id'] ?? 0);
-        $playlistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
+        $groupName        = $settings['channel_group'] ?? 'YouTube Live';
+        $profileId        = (int) ($settings['stream_profile_id'] ?? 0);
+        $playlistId       = (int) ($settings['target_playlist_id'] ?? 0) ?: null;
+        $customPlaylistId = (int) ($settings['target_custom_playlist_id'] ?? 0) ?: null;
 
         $group = Group::firstOrCreate(
             ['name' => $groupName, 'user_id' => $userId],
@@ -341,6 +342,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             'user_id' => $userId,
             'group_id' => $group->id,
             'stream_profile_id' => $profileId ?: null,
+            'playlist_id' => $playlistId,
             'info' => [
                 'plugin' => self::PLUGIN_MARKER,
                 'youtube_video_id' => $metadata['video_id'],
@@ -350,8 +352,8 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             ],
         ]);
 
-        if ($playlistId) {
-            $channel->customPlaylists()->syncWithoutDetaching([$playlistId]);
+        if ($customPlaylistId) {
+            $channel->customPlaylists()->syncWithoutDetaching([$customPlaylistId]);
             $channel->save();
         }
 

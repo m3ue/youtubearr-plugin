@@ -35,6 +35,7 @@
       "label": "Monitored YouTube Channels",
       "type": "textarea",
       "default": "",
+      "required": true,
       "helper_text": "One channel per line. Format: @handle, @handle=BaseNumber, or @handle=BaseNumber:TitleFilter\n\nExamples:\n@NASA=92\n@RyanHallYall=90\n@VirtualRailfan=91:Horseshoe|La Grange\n\nTitle filter is a case-insensitive regex. Channels without =Number are auto-assigned from Starting Channel Number."
     },
     {
@@ -48,14 +49,24 @@
       "helper_text": "Select a yt-dlp Stream Profile to apply to created channels. Cookies configured on this profile will also be used for live stream detection."
     },
     {
+      "id": "target_playlist_id",
+      "label": "Target Playlist (Standard)",
+      "type": "model_select",
+      "model": "App\\Models\\Playlist",
+      "label_attribute": "name",
+      "scope": "owned",
+      "required": false,
+      "helper_text": "Standard playlist to associate created channels with. Leave empty to skip."
+    },
+    {
       "id": "target_custom_playlist_id",
-      "label": "Target Playlist",
+      "label": "Target Playlist (Custom)",
       "type": "model_select",
       "model": "App\\Models\\CustomPlaylist",
       "label_attribute": "name",
       "scope": "owned",
       "required": false,
-      "helper_text": "Custom playlist to add YouTube channels to. Leave empty to create standalone custom channels."
+      "helper_text": "Custom playlist to add created channels to. Leave empty to skip."
     },
     {
       "id": "channel_group",
@@ -69,12 +80,12 @@
       "label": "Stream Quality",
       "type": "select",
       "default": "best",
-      "options": [
-        {"value": "best", "label": "Best Available"},
-        {"value": "1080p", "label": "1080p"},
-        {"value": "720p", "label": "720p"},
-        {"value": "480p", "label": "480p"}
-      ],
+      "options": {
+        "best": "Best Available",
+        "1080p": "1080p",
+        "720p": "720p",
+        "480p": "480p"
+      },
       "helper_text": "Quality preference used when checking live stream metadata via yt-dlp."
     },
     {
@@ -103,10 +114,10 @@
       "label": "Channel Numbering Mode",
       "type": "select",
       "default": "sequential",
-      "options": [
-        {"value": "sequential", "label": "Sequential (2000, 2001, 2002)"},
-        {"value": "decimal", "label": "Decimal (90.1, 90.2, 90.3)"}
-      ],
+      "options": {
+        "sequential": "Sequential (2000, 2001, 2002)",
+        "decimal": "Decimal (90.1, 90.2, 90.3)"
+      },
       "helper_text": "Decimal mode groups streams from the same YouTube channel together using the channel's BaseNumber. Sequential mode uses a global counter."
     },
     {
