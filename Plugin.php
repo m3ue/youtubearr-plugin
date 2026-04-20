@@ -433,6 +433,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         int $userId,
         ?string $cookiesFile,
         PluginExecutionContext $context,
+        int $graceMinutes = 5,
     ): int {
         /** @var Collection<int, Channel> $channels */
         $channels = Channel::where('user_id', $userId)
@@ -447,7 +448,15 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 continue;
             }
 
-            if (! $this->isVideoStillLive($ytdlp, $videoId, $cookiesFile)) {
+            // Skip channels that were just created — they may have been added
+            // earlier in this same sync pass and their yt-dlp check hasn't settled yet.
+            if ($channel->created_at && $channel->created_at->gt(now()->subMinutes($graceMinutes))) {
+                $context->info("Skipping recently added channel #{$channel->channel} '{$channel->title}' (grace period).");
+
+                continue;
+            }
+
+            if (! $this->isVideoStillLive($ytdlp, $videoId, $cookiesFile, $context)) {
                 $context->info("Stream ended for video {$videoId} (channel #{$channel->channel} '{$channel->title}') — removing.");
                 $channel->delete();
                 $cleaned++;
@@ -596,13 +605,36 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         ];
     }
 
-    private function isVideoStillLive(string $ytdlp, string $videoId, ?string $cookiesFile): bool
+    private function isVideoStillLive(string $ytdlp, string $videoId, ?string $cookiesFile, ?PluginExecutionContext $context = null): bool
     {
         $url = "https://www.youtube.com/watch?v={$videoId}";
-        $info = $this->runYtDlpJson($ytdlp, $url, $cookiesFile, timeout: 30);
 
-        if (! $info) {
-            return false;
+        $cmd = [$ytdlp, '--dump-json', '--no-download', '--no-warnings'];
+
+        if ($cookiesFile) {
+            $cmd[] = '--cookies';
+            $cmd[] = $cookiesFile;
+        }
+
+        $cmd[] = $url;
+
+        $result = $this->runProcess($cmd, 30);
+
+        // Any non-clean exit (signal, timeout, network error, rate-limit) is treated as
+        // "unable to confirm" — we assume the stream is still live to avoid false removal.
+        // Only delete when yt-dlp exits cleanly (0) and JSON positively shows not-live.
+        if ($result['exit'] !== 0 || empty($result['stdout'])) {
+            if ($context && $result['exit'] !== 0) {
+                $context->info("Could not confirm live status for {$videoId} (exit {$result['exit']}) — assuming still live.");
+            }
+
+            return true;
+        }
+
+        $info = json_decode($result['stdout'], true);
+
+        if (! is_array($info)) {
+            return true;
         }
 
         return ($info['is_live'] ?? false) || ($info['live_status'] ?? '') === 'is_live';
@@ -874,12 +906,18 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      */
     private function runProcess(array $cmd, int $timeoutSeconds = 30): array
     {
-        $result = Process::timeout($timeoutSeconds)->run($cmd);
+        try {
+            $result = Process::timeout($timeoutSeconds)->run($cmd);
 
-        return [
-            'exit' => $result->exitCode() ?? -1,
-            'stdout' => $result->output(),
-            'stderr' => $result->errorOutput(),
-        ];
+            return [
+                'exit' => $result->exitCode() ?? -1,
+                'stdout' => $result->output(),
+                'stderr' => $result->errorOutput(),
+            ];
+        } catch (\Throwable $e) {
+            // Catches ProcessSignaledException (e.g. SIGINT from Horizon graceful shutdown),
+            // ProcessTimedOutException, and any other unexpected errors.
+            return ['exit' => -1, 'stdout' => '', 'stderr' => $e->getMessage()];
+        }
     }
 }
