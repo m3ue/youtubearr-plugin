@@ -111,20 +111,27 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $errors = [];
         $cookiesFile = $this->getCookiesFile($profile);
 
+        $totalHandles = count($channelLines);
+        $totalDirect = count($monitoredStreamLines);
+
         // Pre-fetch channel avatars for all monitored handles if avatar mode is active.
         $logoSource = $settings['channel_logo_source'] ?? 'stream_thumbnail';
-        if ($logoSource === 'channel_avatar') {
+        if ($logoSource === 'channel_avatar' && $totalHandles > 0) {
+            $context->checkpoint(5, "Pre-fetching avatars for {$totalHandles} channel(s)…");
             foreach ($channelLines as $entry) {
                 $this->fetchChannelAvatar($entry['handle']);
             }
         }
 
         // --- Handle-based monitoring: scan each channel's /streams playlist ---
-        foreach ($channelLines as $entry) {
+        // Progress range: 10 – 65 % split equally across handles.
+        foreach ($channelLines as $idx => $entry) {
             $handle = $entry['handle'];
             $baseNumber = $entry['base_number'];
             $titleFilter = $entry['title_filter'];
 
+            $pct = 10 + (int) (($idx / max(1, $totalHandles)) * 55);
+            $context->checkpoint($pct, "Checking @{$handle}…");
             $context->info("Checking @{$handle} for live streams…");
 
             $streams = $this->fetchAllLiveStreams($ytdlp, $handle, $settings, $cookiesFile);
@@ -173,7 +180,17 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         }
 
         // --- Direct stream monitoring: check each specific video ID/URL ---
-        foreach ($monitoredStreamLines as $videoIdOrUrl) {
+        // Progress range: 65 – 75 % split across direct streams.
+        if ($totalDirect > 0) {
+            $context->checkpoint(65, "Checking {$totalDirect} direct stream(s)…");
+        }
+
+        foreach ($monitoredStreamLines as $idx => $videoIdOrUrl) {
+            if ($totalDirect > 1) {
+                $pct = 65 + (int) (($idx / $totalDirect) * 10);
+                $context->checkpoint($pct, 'Checking direct stream '.($idx + 1)." of {$totalDirect}…");
+            }
+
             $videoId = $this->extractVideoId($ytdlp, $videoIdOrUrl, $cookiesFile);
 
             if (! $videoId) {
@@ -214,21 +231,28 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             }
         }
 
+        // --- Cleanup ended streams ---
         if ($settings['auto_cleanup'] ?? true) {
+            $context->checkpoint(75, 'Cleaning up ended streams…');
             $cleaned = $this->cleanupEndedChannels($ytdlp, $userId, $cookiesFile, $context, $settings);
         }
 
         $this->cleanupCookiesFile($cookiesFile);
 
-        // Refresh expiring EPG programme windows and regenerate the XMLTV file.
+        // --- Refresh and write EPG ---
+        // `refreshEpgForActiveChannels` returns the loaded collection so we can
+        // pass it straight to `writeXmltvFile` and skip the second DB query.
         if ($settings['epg_enabled'] ?? false) {
+            $context->checkpoint(88, 'Updating EPG…');
             $epgSource = $this->ensureEpgSource($userId);
-            $refreshed = $this->refreshEpgForActiveChannels($userId, $settings);
-            $this->writeXmltvFile($userId, $epgSource);
+            [$refreshed, $epgChannels] = $this->refreshEpgForActiveChannels($userId, $settings);
+            $this->writeXmltvFile($userId, $epgSource, $epgChannels);
             if ($refreshed > 0) {
                 $context->info("EPG: extended programme window for {$refreshed} channel(s).");
             }
         }
+
+        $context->checkpoint(95, 'Finalizing…');
 
         $parts = [];
         if ($added) {
@@ -445,6 +469,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         }
 
         $changes = [];
+        $info = $channel->info ?? [];
 
         if ($logo !== null && $logo !== '' && $logo !== $channel->logo_internal) {
             $changes['logo_internal'] = $logo;
@@ -468,16 +493,9 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         // Always keep stream_title in sync — it's the raw YouTube stream title used
         // as the EPG programme description, independent of channel_name_mode.
-        $currentStreamTitle = data_get($channel->info, 'stream_title', '');
-        if ($metadata['title'] !== $currentStreamTitle) {
-            $info = $channel->info ?? [];
+        if ($metadata['title'] !== ($info['stream_title'] ?? '')) {
             $info['stream_title'] = $metadata['title'];
-            $channel->info = $info;
-            $channel->save();
-        }
-
-        if (! empty($changes)) {
-            $channel->update($changes);
+            $changes['info'] = $info;
         }
 
         // Ensure EPG channel is linked and up-to-date if EPG is enabled.
@@ -488,16 +506,20 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             $epgChannel = $this->ensureEpgChannel($epgSource, $userId, $metadata['video_id'], $title, $logoForEpg);
 
             if ($channel->epg_channel_id !== $epgChannel->id) {
-                $channel->update(['epg_channel_id' => $epgChannel->id]);
+                $changes['epg_channel_id'] = $epgChannel->id;
 
                 $epgDays = max(1, (int) (($settings['epg_days'] ?? 3) ?: 3));
                 $window = $this->epgProgrammeWindow($epgDays);
-                $info = $channel->info ?? [];
+                // Use any info already staged in $changes, otherwise start from current info.
+                $info = $changes['info'] ?? $info;
                 $info['epg_programme_start'] = $window['start'];
                 $info['epg_programme_stop'] = $window['stop'];
-                $channel->info = $info;
-                $channel->save();
+                $changes['info'] = $info;
             }
+        }
+
+        if (! empty($changes)) {
+            $channel->update($changes);
         }
     }
 
@@ -902,11 +924,16 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      * All plugin channels with an `epg_channel_id` are included. Each channel
      * gets a `<channel>` block and a single `<programme>` block that spans the
      * window stored in `channel.info` (`epg_programme_start` / `epg_programme_stop`).
+     *
+     * Pass `$channels` when you have already loaded the collection (e.g. from
+     * `refreshEpgForActiveChannels`) to avoid an extra DB round-trip.
+     *
+     * @param  Collection<int, Channel>|null  $channels
      */
-    private function writeXmltvFile(int $userId, Epg $epg): void
+    private function writeXmltvFile(int $userId, Epg $epg, ?Collection $channels = null): void
     {
         /** @var Collection<int, Channel> $channels */
-        $channels = Channel::where('user_id', $userId)
+        $channels ??= Channel::where('user_id', $userId)
             ->whereJsonContains('info->plugin', self::PLUGIN_MARKER)
             ->whereNotNull('epg_channel_id')
             ->get();
@@ -1000,9 +1027,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      * through today + N days. Called on every monitoring cycle so the window
      * rolls forward automatically each day.
      *
-     * Returns the count of channels whose window was updated.
+     * Returns `[int $refreshed, Collection $channels]` so the caller can pass
+     * the already-loaded collection straight to `writeXmltvFile()` and skip
+     * the second DB query.
+     *
+     * @return array{0: int, 1: Collection<int, Channel>}
      */
-    private function refreshEpgForActiveChannels(int $userId, array $settings): int
+    private function refreshEpgForActiveChannels(int $userId, array $settings): array
     {
         $epgDays = max(1, (int) (($settings['epg_days'] ?? 3) ?: 3));
         $window = $this->epgProgrammeWindow($epgDays);
@@ -1032,7 +1063,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             $refreshed++;
         }
 
-        return $refreshed;
+        return [$refreshed, $channels];
     }
 
     // -------------------------------------------------------------------------
