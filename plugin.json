@@ -1,7 +1,7 @@
 {
   "id": "youtubearr",
   "name": "YouTubearr",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "api_version": "1.0.0",
   "repository": "m3ue/youtubearr-m3ue",
   "description": "Monitor YouTube channels for livestreams and auto-create/remove channels. Zero API quota — uses yt-dlp.",
@@ -136,13 +136,6 @@
           "helper_text": "How to name created channels. Channel Name mode groups streams by YouTube channel with sequential suffixes (#1, #2…). Suffixes are compacted when a stream ends so there are no gaps."
         },
         {
-          "id": "auto_cleanup",
-          "label": "Auto-cleanup Ended Streams",
-          "type": "boolean",
-          "default": true,
-          "helper_text": "Automatically delete channels when their YouTube livestream ends. Runs during each monitoring cycle."
-        },
-        {
           "id": "starting_channel_number",
           "label": "Starting Channel Number",
           "type": "number",
@@ -166,6 +159,30 @@
             "decimal": "Decimal (90.1, 90.2, 90.3)"
           },
           "helper_text": "Decimal mode groups streams from the same YouTube channel together using the channel's BaseNumber. Sequential mode uses a global counter."
+        }
+      ]
+    },
+    {
+      "id": "cleanup_settings",
+      "type": "section",
+      "label": "Cleanup",
+      "description": "Controls how ended streams are detected and removed.",
+      "collapsible": true,
+      "collapsed": false,
+      "fields": [
+        {
+          "id": "auto_cleanup",
+          "label": "Auto-cleanup Ended Streams",
+          "type": "boolean",
+          "default": true,
+          "helper_text": "Automatically delete channels when their YouTube livestream ends. Runs during each monitoring cycle."
+        },
+        {
+          "id": "live_check_failure_threshold",
+          "label": "Live Check Failure Threshold",
+          "type": "number",
+          "default": 5,
+          "helper_text": "Number of consecutive inconclusive live-status checks (e.g. yt-dlp rate-limit or network error) before a channel is removed. Set to 0 to never remove on check failure."
         }
       ]
     },

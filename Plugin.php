@@ -638,6 +638,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $cleaned = 0;
         $deletedChannelNames = [];
+        $failureThreshold = max(0, (int) ($settings['live_check_failure_threshold'] ?? 5));
 
         foreach ($channels as $channel) {
             $videoId = data_get($channel->info, 'youtube_video_id');
@@ -653,18 +654,49 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 continue;
             }
 
-            if (! $this->isVideoStillLive($ytdlp, $videoId, $cookiesFile, $context)) {
-                $context->info("Stream ended for video {$videoId} (channel #{$channel->channel} '{$channel->title}') — removing.");
+            $isLive = $this->isVideoStillLive($ytdlp, $videoId, $cookiesFile, $context);
 
-                $channelName = data_get($channel->info, 'youtube_channel_name');
+            if ($isLive === null) {
+                // Inconclusive check — track consecutive failures and remove only after threshold.
+                if ($failureThreshold > 0) {
+                    $failures = (int) data_get($channel->info, 'youtube_live_check_failures', 0) + 1;
+                    $info = $channel->info ?? [];
+                    $info['youtube_live_check_failures'] = $failures;
+                    $channel->info = $info;
+                    $channel->save();
 
-                $this->removeEpgChannel($channel);
-                $channel->delete();
-                $cleaned++;
+                    $context->info("Live check inconclusive for video {$videoId} (failure {$failures}/{$failureThreshold}).");
 
-                if ($channelName && ($settings['channel_name_mode'] ?? 'stream_title') === 'channel_name') {
-                    $deletedChannelNames[] = $channelName;
+                    if ($failures < $failureThreshold) {
+                        continue;
+                    }
+
+                    $context->info("Failure threshold reached for video {$videoId} (channel #{$channel->channel} '{$channel->title}') — removing.");
+                } else {
+                    continue;
                 }
+            } elseif ($isLive === true) {
+                // Confirmed live — reset any accumulated failure count.
+                if ((int) data_get($channel->info, 'youtube_live_check_failures', 0) > 0) {
+                    $info = $channel->info ?? [];
+                    $info['youtube_live_check_failures'] = 0;
+                    $channel->info = $info;
+                    $channel->save();
+                }
+
+                continue;
+            } else {
+                $context->info("Stream ended for video {$videoId} (channel #{$channel->channel} '{$channel->title}') — removing.");
+            }
+
+            $channelName = data_get($channel->info, 'youtube_channel_name');
+
+            $this->removeEpgChannel($channel);
+            $channel->delete();
+            $cleaned++;
+
+            if ($channelName && ($settings['channel_name_mode'] ?? 'stream_title') === 'channel_name') {
+                $deletedChannelNames[] = $channelName;
             }
         }
 
@@ -1205,7 +1237,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         ];
     }
 
-    private function isVideoStillLive(string $ytdlp, string $videoId, ?string $cookiesFile, ?PluginExecutionContext $context = null): bool
+    /**
+     * Check whether a YouTube video is still live.
+     *
+     * Returns true (confirmed live), false (confirmed ended), or null when the
+     * check is inconclusive (yt-dlp error, timeout, rate-limit, empty output).
+     */
+    private function isVideoStillLive(string $ytdlp, string $videoId, ?string $cookiesFile, ?PluginExecutionContext $context = null): ?bool
     {
         $url = "https://www.youtube.com/watch?v={$videoId}";
 
@@ -1220,21 +1258,20 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
         $result = $this->runProcess($cmd, 30);
 
-        // Any non-clean exit (signal, timeout, network error, rate-limit) is treated as
-        // "unable to confirm" — we assume the stream is still live to avoid false removal.
-        // Only delete when yt-dlp exits cleanly (0) and JSON positively shows not-live.
+        // Non-clean exit or empty output means we cannot confirm either way.
+        // Return null so the caller can decide whether to apply a failure threshold.
         if ($result['exit'] !== 0 || empty($result['stdout'])) {
             if ($context && $result['exit'] !== 0) {
-                $context->info("Could not confirm live status for {$videoId} (exit {$result['exit']}) — assuming still live.");
+                $context->info("Could not confirm live status for {$videoId} (exit {$result['exit']}) — check inconclusive.");
             }
 
-            return true;
+            return null;
         }
 
         $info = json_decode($result['stdout'], true);
 
         if (! is_array($info)) {
-            return true;
+            return null;
         }
 
         return ($info['is_live'] ?? false) || ($info['live_status'] ?? '') === 'is_live';
