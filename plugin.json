@@ -72,7 +72,7 @@
           "label_attribute": "name",
           "scope": "owned",
           "required": true,
-          "helper_text": "Select a yt-dlp Stream Profile to apply to created channels. Cookies configured on this profile will also be used for live stream detection."
+          "helper_text": "Select a yt-dlp Stream Profile to apply to created channels. The Cookies Path configured on this profile will be passed to the m3u-proxy's yt-dlp instance for live stream detection and metadata fetching — the proxy host must have the cookies file at that path."
         },
         {
           "id": "stream_quality",

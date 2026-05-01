@@ -93,9 +93,13 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return PluginActionResult::failure('Could not determine user ID. Ensure a Stream Profile is configured.');
         }
 
+        // Prefer the proxy yt-dlp path (it has access to the cookies file).
+        // Fall back to a local yt-dlp binary when no proxy is configured.
+        $usingProxy = $this->proxyYtDlpAvailable();
         $ytdlp = $this->findYtDlp();
-        if (! $ytdlp) {
-            return PluginActionResult::failure('yt-dlp binary not found. Ensure yt-dlp is installed.');
+
+        if (! $usingProxy && ! $ytdlp) {
+            return PluginActionResult::failure('yt-dlp binary not found and no proxy is configured. Install yt-dlp or configure the m3u-proxy.');
         }
 
         $channelLines = $this->parseMonitoredChannels($settings['monitored_channels'] ?? '');
@@ -109,7 +113,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $skipped = 0;
         $cleaned = 0;
         $errors = [];
-        $cookiesFile = $this->getCookiesFile($profile);
+        $cookiesPath = $this->getCookiesPath($profile);
 
         $totalHandles = count($channelLines);
         $totalDirect = count($monitoredStreamLines);
@@ -134,7 +138,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             $context->checkpoint($pct, "Checking @{$handle}…");
             $context->info("Checking @{$handle} for live streams…");
 
-            $streams = $this->fetchAllLiveStreams($ytdlp, $handle, $settings, $cookiesFile);
+            $streams = $this->fetchAllLiveStreams($ytdlp, $handle, $settings, $cookiesPath, $context);
 
             if (empty($streams)) {
                 $context->info("@{$handle}: no live streams found");
@@ -191,7 +195,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 $context->checkpoint($pct, 'Checking direct stream '.($idx + 1)." of {$totalDirect}…");
             }
 
-            $videoId = $this->extractVideoId($ytdlp, $videoIdOrUrl, $cookiesFile);
+            $videoId = $this->extractVideoId($ytdlp, $videoIdOrUrl, $cookiesPath);
 
             if (! $videoId) {
                 $errors[] = 'Could not extract video ID from: '.substr($videoIdOrUrl, 0, 60);
@@ -204,7 +208,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 ->whereJsonContains('info->youtube_video_id', $videoId)
                 ->first();
 
-            $metadata = $this->fetchVideoMetadata($ytdlp, $videoId, $settings, $cookiesFile);
+            $metadata = $this->fetchVideoMetadata($ytdlp, $videoId, $settings, $cookiesPath);
 
             if ($existing) {
                 if ($metadata) {
@@ -234,10 +238,8 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         // --- Cleanup ended streams ---
         if ($settings['auto_cleanup'] ?? true) {
             $context->checkpoint(75, 'Cleaning up ended streams…');
-            $cleaned = $this->cleanupEndedChannels($ytdlp, $userId, $cookiesFile, $context, $settings);
+            $cleaned = $this->cleanupEndedChannels($ytdlp, $userId, $cookiesPath, $context, $settings);
         }
-
-        $this->cleanupCookiesFile($cookiesFile);
 
         // --- Refresh and write EPG ---
         // `refreshEpgForActiveChannels` returns the loaded collection so we can
@@ -285,9 +287,11 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return PluginActionResult::failure('Could not determine user ID. Ensure a Stream Profile is configured.');
         }
 
+        $usingProxy = $this->proxyYtDlpAvailable();
         $ytdlp = $this->findYtDlp();
-        if (! $ytdlp) {
-            return PluginActionResult::failure('yt-dlp binary not found.');
+
+        if (! $usingProxy && ! $ytdlp) {
+            return PluginActionResult::failure('yt-dlp binary not found and no proxy is configured.');
         }
 
         $rawUrls = trim($payload['manual_url'] ?? '');
@@ -303,10 +307,10 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
         $added = 0;
         $skipped = 0;
         $errors = [];
-        $cookiesFile = $this->getCookiesFile($profile);
+        $cookiesPath = $this->getCookiesPath($profile);
 
         foreach ($urls as $url) {
-            $videoId = $this->extractVideoId($ytdlp, $url, $cookiesFile);
+            $videoId = $this->extractVideoId($ytdlp, $url, $cookiesPath);
 
             if (! $videoId) {
                 $errors[] = 'Could not extract video ID from: '.substr($url, 0, 60);
@@ -319,7 +323,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 ->whereJsonContains('info->youtube_video_id', $videoId)
                 ->first();
 
-            $metadata = $this->fetchVideoMetadata($ytdlp, $videoId, $settings, $cookiesFile);
+            $metadata = $this->fetchVideoMetadata($ytdlp, $videoId, $settings, $cookiesPath);
 
             if ($existing) {
                 $context->info("Video {$videoId} already tracked as channel #{$existing->channel} — updating.");
@@ -354,8 +358,6 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 $errors[] = $e->getMessage();
             }
         }
-
-        $this->cleanupCookiesFile($cookiesFile);
 
         if ($added > 0 && ($settings['epg_enabled'] ?? false)) {
             $epgSource = $this->ensureEpgSource($userId);
@@ -392,14 +394,15 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return PluginActionResult::failure('Could not determine user ID.');
         }
 
+        $usingProxy = $this->proxyYtDlpAvailable();
         $ytdlp = $this->findYtDlp();
-        if (! $ytdlp) {
-            return PluginActionResult::failure('yt-dlp binary not found.');
+
+        if (! $usingProxy && ! $ytdlp) {
+            return PluginActionResult::failure('yt-dlp binary not found and no proxy is configured.');
         }
 
-        $cookiesFile = $this->getCookiesFile($profile);
-        $cleaned = $this->cleanupEndedChannels($ytdlp, $userId, $cookiesFile, $context, $settings);
-        $this->cleanupCookiesFile($cookiesFile);
+        $cookiesPath = $this->getCookiesPath($profile);
+        $cleaned = $this->cleanupEndedChannels($ytdlp, $userId, $cookiesPath, $context, $settings);
 
         if ($settings['epg_enabled'] ?? false) {
             $epgSource = $this->ensureEpgSource($userId);
@@ -624,9 +627,9 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     }
 
     private function cleanupEndedChannels(
-        string $ytdlp,
+        ?string $ytdlp,
         int $userId,
-        ?string $cookiesFile,
+        ?string $cookiesPath,
         PluginExecutionContext $context,
         array $settings = [],
         int $graceMinutes = 5,
@@ -654,7 +657,7 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
                 continue;
             }
 
-            $isLive = $this->isVideoStillLive($ytdlp, $videoId, $cookiesFile, $context);
+            $isLive = $this->isVideoStillLive($ytdlp, $videoId, $cookiesPath, $context);
 
             if ($isLive === null) {
                 // Inconclusive check — track consecutive failures and remove only after threshold.
@@ -1146,23 +1149,74 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      * Fetch all currently live streams for a YouTube channel handle by scanning
      * the channel's /streams playlist tab with --flat-playlist.
      *
+     * Prefers the proxy yt-dlp endpoint (which has access to the cookies file on
+     * the proxy host). Falls back to a local yt-dlp binary (without cookies)
+     * when no proxy is reachable.
+     *
      * Returns an empty array if the channel has no live streams or yt-dlp fails.
      *
      * @return list<array{video_id: string, title: string, youtube_channel_id: string, youtube_channel_name: string, youtube_handle: string, logo: string, is_live: bool}>
      */
-    private function fetchAllLiveStreams(string $ytdlp, string $handle, array $settings, ?string $cookiesFile): array
-    {
+    private function fetchAllLiveStreams(
+        ?string $ytdlp,
+        string $handle,
+        array $settings,
+        ?string $cookiesPath,
+        ?PluginExecutionContext $context = null,
+    ): array {
         $handle = ltrim($handle, '@');
-        $url = "https://www.youtube.com/@{$handle}/streams";
+        $streamsUrl = "https://www.youtube.com/@{$handle}/streams";
+        $liveUrl = "https://www.youtube.com/@{$handle}/live";
 
-        $cmd = [$ytdlp, '--flat-playlist', '--dump-json', '--no-download', '--no-warnings'];
+        $streams = [];
 
-        if ($cookiesFile) {
-            $cmd[] = '--cookies';
-            $cmd[] = $cookiesFile;
+        // --- Proxy path (preferred — has cookies-file access) ---
+        if ($this->proxyYtDlpAvailable()) {
+            // 1) Try the /streams playlist tab (can surface multiple concurrent streams)
+            $result = $this->callProxyYtDlpJson($streamsUrl, $cookiesPath, null, true, 60);
+            if ($result !== null && isset($result['entries'])) {
+                $context?->info("@{$handle}: proxy returned ".count($result['entries']).' playlist entry/entries from /streams tab');
+                $streams = $this->parseLiveStreamEntries($result['entries'], $handle);
+            } elseif ($result === null) {
+                $context?->info("@{$handle}: proxy /streams call failed or returned no data — trying /live fallback");
+            }
+
+            // 2) If the playlist approach found nothing, try the /live redirect which
+            //    is more reliable for channels with a single active stream.
+            if (empty($streams)) {
+                $liveMeta = $this->callProxyYtDlpJson($liveUrl, $cookiesPath, null, false, 30);
+                if ($liveMeta !== null) {
+                    $isLive = ($liveMeta['live_status'] ?? '') === 'is_live' || ($liveMeta['is_live'] ?? false);
+                    $videoId = $liveMeta['id'] ?? '';
+                    if ($isLive && $videoId !== '') {
+                        $context?->info("@{$handle}: detected live stream via /live URL — video {$videoId}");
+                        $streams[] = [
+                            'video_id' => $videoId,
+                            'title' => $liveMeta['title'] ?? 'Untitled',
+                            'youtube_channel_id' => $liveMeta['channel_id'] ?? '',
+                            'youtube_channel_name' => $liveMeta['channel'] ?? $liveMeta['uploader'] ?? $handle,
+                            'youtube_handle' => $handle,
+                            'logo' => $this->extractBestThumbnail($liveMeta),
+                            'is_live' => true,
+                        ];
+                    } else {
+                        $liveStatus = $liveMeta['live_status'] ?? 'null';
+                        $context?->info("@{$handle}: /live URL returned metadata but stream is not live (live_status={$liveStatus})");
+                    }
+                } else {
+                    $context?->info("@{$handle}: proxy /live call returned no data — no active stream detected");
+                }
+            }
+
+            return $streams;
         }
 
-        $cmd[] = $url;
+        // --- Local yt-dlp fallback (no cookies available in this path) ---
+        if (! $ytdlp) {
+            return [];
+        }
+
+        $cmd = [$ytdlp, '--flat-playlist', '--dump-json', '--no-download', '--no-warnings', $streamsUrl];
 
         $result = $this->runProcess($cmd, 60);
 
@@ -1170,15 +1224,33 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return [];
         }
 
-        $streams = [];
-
+        $entries = [];
         foreach (explode("\n", trim($result['stdout'])) as $line) {
             $line = trim($line);
             if ($line === '') {
                 continue;
             }
-
             $entry = json_decode($line, true);
+            if (is_array($entry)) {
+                $entries[] = $entry;
+            }
+        }
+
+        return $this->parseLiveStreamEntries($entries, $handle);
+    }
+
+    /**
+     * Filter a flat-playlist entries array to live streams and normalise to
+     * the plugin's channel metadata shape.
+     *
+     * @param  list<array<string, mixed>>  $entries
+     * @return list<array{video_id: string, title: string, youtube_channel_id: string, youtube_channel_name: string, youtube_handle: string, logo: string, is_live: bool}>
+     */
+    private function parseLiveStreamEntries(array $entries, string $handle): array
+    {
+        $streams = [];
+
+        foreach ($entries as $entry) {
             if (! is_array($entry)) {
                 continue;
             }
@@ -1212,12 +1284,12 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
      *
      * @return array{video_id: string, title: string, youtube_channel_id: string, youtube_channel_name: string, youtube_handle: string, logo: string, is_live: bool}|null
      */
-    private function fetchVideoMetadata(string $ytdlp, string $videoId, array $settings, ?string $cookiesFile): ?array
+    private function fetchVideoMetadata(?string $ytdlp, string $videoId, array $settings, ?string $cookiesPath): ?array
     {
         $url = "https://www.youtube.com/watch?v={$videoId}";
         $format = $this->qualityToFormat($settings['stream_quality'] ?? 'best');
 
-        $info = $this->runYtDlpJson($ytdlp, $url, $cookiesFile, $format, 45);
+        $info = $this->runYtDlpJson($ytdlp, $url, $cookiesPath, $format, 45);
 
         if (! $info) {
             return null;
@@ -1240,26 +1312,40 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     /**
      * Check whether a YouTube video is still live.
      *
+     * Prefers the proxy yt-dlp endpoint (with cookies). Falls back to local
+     * yt-dlp (without cookies) when no proxy is available.
+     *
      * Returns true (confirmed live), false (confirmed ended), or null when the
      * check is inconclusive (yt-dlp error, timeout, rate-limit, empty output).
      */
-    private function isVideoStillLive(string $ytdlp, string $videoId, ?string $cookiesFile, ?PluginExecutionContext $context = null): ?bool
+    private function isVideoStillLive(?string $ytdlp, string $videoId, ?string $cookiesPath, ?PluginExecutionContext $context = null): ?bool
     {
         $url = "https://www.youtube.com/watch?v={$videoId}";
 
-        $cmd = [$ytdlp, '--dump-json', '--no-download', '--no-warnings'];
+        // --- Proxy path ---
+        if ($this->proxyYtDlpAvailable()) {
+            $info = $this->callProxyYtDlpJson($url, $cookiesPath, null, false, 30);
+            if ($info !== null && is_array($info)) {
+                return ($info['is_live'] ?? false) || ($info['live_status'] ?? '') === 'is_live';
+            }
+            // Proxy call failed — treat as inconclusive so the failure threshold logic applies.
+            if ($context) {
+                $context->info("Live check via proxy inconclusive for {$videoId}.");
+            }
 
-        if ($cookiesFile) {
-            $cmd[] = '--cookies';
-            $cmd[] = $cookiesFile;
+            return null;
         }
 
-        $cmd[] = $url;
+        // --- Local yt-dlp fallback ---
+        if (! $ytdlp) {
+            return null;
+        }
+
+        $cmd = [$ytdlp, '--dump-json', '--no-download', '--no-warnings', $url];
 
         $result = $this->runProcess($cmd, 30);
 
         // Non-clean exit or empty output means we cannot confirm either way.
-        // Return null so the caller can decide whether to apply a failure threshold.
         if ($result['exit'] !== 0 || empty($result['stdout'])) {
             if ($context && $result['exit'] !== 0) {
                 $context->info("Could not confirm live status for {$videoId} (exit {$result['exit']}) — check inconclusive.");
@@ -1279,9 +1365,9 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
 
     /**
      * Extract a YouTube video ID from a URL.
-     * Falls back to yt-dlp if regex matching fails.
+     * Falls back to the proxy yt-dlp endpoint (or local binary) if regex matching fails.
      */
-    private function extractVideoId(string $ytdlp, string $url, ?string $cookiesFile): ?string
+    private function extractVideoId(?string $ytdlp, string $url, ?string $cookiesPath): ?string
     {
         $patterns = [
             '/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/live\/)([a-zA-Z0-9_-]{11})/',
@@ -1299,23 +1385,10 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
             return trim($url);
         }
 
-        // Fallback: ask yt-dlp to print the ID
-        $cmd = [$ytdlp, '--print', 'id', '--no-download', '--no-warnings'];
-
-        if ($cookiesFile) {
-            $cmd[] = '--cookies';
-            $cmd[] = $cookiesFile;
-        }
-
-        $cmd[] = $url;
-
-        $result = $this->runProcess($cmd, 30);
-
-        if ($result['exit'] === 0) {
-            $id = trim($result['stdout']);
-            if (strlen($id) === 11) {
-                return $id;
-            }
+        // Fallback: fetch metadata from the proxy (or local yt-dlp) and read 'id'
+        $info = $this->runYtDlpJson($ytdlp, $url, $cookiesPath, null, 30);
+        if ($info && isset($info['id']) && strlen((string) $info['id']) === 11) {
+            return (string) $info['id'];
         }
 
         return null;
@@ -1324,20 +1397,29 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     /**
      * Run yt-dlp --dump-json on a URL and return the parsed JSON array, or null on failure.
      *
+     * Prefers the proxy /ytdlp/metadata endpoint (which has access to cookies on
+     * the proxy host). Falls back to the local yt-dlp binary (without cookies)
+     * when no proxy is configured.
+     *
      * @return array<string, mixed>|null
      */
-    private function runYtDlpJson(string $ytdlp, string $url, ?string $cookiesFile, ?string $format = null, int $timeout = 45): ?array
+    private function runYtDlpJson(?string $ytdlp, string $url, ?string $cookiesPath, ?string $format = null, int $timeout = 45): ?array
     {
+        // --- Proxy path ---
+        if ($this->proxyYtDlpAvailable()) {
+            return $this->callProxyYtDlpJson($url, $cookiesPath, $format, false, $timeout);
+        }
+
+        // --- Local yt-dlp fallback ---
+        if (! $ytdlp) {
+            return null;
+        }
+
         $cmd = [$ytdlp, '--dump-json', '--no-download', '--no-warnings'];
 
         if ($format !== null) {
             $cmd[] = '--format';
             $cmd[] = $format;
-        }
-
-        if ($cookiesFile) {
-            $cmd[] = '--cookies';
-            $cmd[] = $cookiesFile;
         }
 
         $cmd[] = $url;
@@ -1451,34 +1533,113 @@ class Plugin implements ChannelProcessorPluginInterface, PluginInterface, Schedu
     }
 
     /**
-     * Write cookies content from a StreamProfile to a temp file.
-     * Returns the path, or null if no cookies are configured.
+     * Return the cookies file path from a StreamProfile.
+     *
+     * The `cookies_path` field stores an absolute path to a Netscape-format
+     * cookies.txt file on the **proxy host's** filesystem.  It is passed
+     * directly to the proxy /ytdlp/metadata endpoint — the plugin never
+     * writes or reads the file contents itself.
      */
-    private function getCookiesFile(?StreamProfile $profile): ?string
+    private function getCookiesPath(?StreamProfile $profile): ?string
     {
-        if (! $profile || empty($profile->cookies)) {
+        if (! $profile) {
             return null;
         }
 
-        $content = trim($profile->cookies);
-        if ($content === '') {
+        $path = trim((string) ($profile->cookies_path ?? ''));
+
+        return $path !== '' ? $path : null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Proxy / yt-dlp delegation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Return the base URL of the configured m3u-proxy instance (no trailing slash).
+     */
+    private function getProxyBaseUrl(): string
+    {
+        $host = rtrim((string) config('proxy.m3u_proxy_host', ''), '/');
+        $port = config('proxy.m3u_proxy_port');
+        if ($port) {
+            $host .= ':'.$port;
+        }
+
+        return $host;
+    }
+
+    /**
+     * Return the API token for the m3u-proxy, or null if none is configured.
+     */
+    private function getProxyToken(): ?string
+    {
+        $token = config('proxy.m3u_proxy_token');
+
+        return $token ? (string) $token : null;
+    }
+
+    /**
+     * Return true when the proxy base URL is set (regardless of reachability).
+     * Used to decide whether to prefer the proxy yt-dlp path.
+     */
+    private function proxyYtDlpAvailable(): bool
+    {
+        return $this->getProxyBaseUrl() !== '';
+    }
+
+    /**
+     * Call POST /ytdlp/metadata on the proxy and return the decoded JSON.
+     *
+     * Returns null on any error (network failure, HTTP error, yt-dlp failure).
+     * When `$flatPlaylist` is true the proxy returns `{"entries": [...]}` and
+     * this method returns that wrapper array.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function callProxyYtDlpJson(
+        string $url,
+        ?string $cookiesPath,
+        ?string $format = null,
+        bool $flatPlaylist = false,
+        int $timeout = 60,
+    ): ?array {
+        $baseUrl = $this->getProxyBaseUrl();
+        if ($baseUrl === '') {
             return null;
+        }
+
+        $request = Http::timeout($timeout);
+        $token = $this->getProxyToken();
+        if ($token) {
+            $request = $request->withHeaders(['X-API-Token' => $token]);
+        }
+
+        $payload = [
+            'url' => $url,
+            'flat_playlist' => $flatPlaylist,
+        ];
+        if ($cookiesPath !== null) {
+            $payload['cookies_path'] = $cookiesPath;
+        }
+        if ($format !== null) {
+            $payload['format'] = $format;
         }
 
         try {
-            $path = tempnam(sys_get_temp_dir(), 'youtubearr_cookies_').'.txt';
-            file_put_contents($path, $content."\n");
+            $response = $request->post("{$baseUrl}/ytdlp/metadata", $payload);
+            if (! $response->successful()) {
+                $detail = $response->json('detail') ?? $response->body();
+                \Log::warning("YouTubearr: proxy /ytdlp/metadata returned HTTP {$response->status()} for {$url}: {$detail}");
 
-            return $path;
-        } catch (\Throwable) {
+                return null;
+            }
+
+            return $response->json();
+        } catch (\Throwable $e) {
+            \Log::warning("YouTubearr: proxy /ytdlp/metadata request failed for {$url}: {$e->getMessage()}");
+
             return null;
-        }
-    }
-
-    private function cleanupCookiesFile(?string $path): void
-    {
-        if ($path && file_exists($path)) {
-            @unlink($path);
         }
     }
 
